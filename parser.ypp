@@ -1,0 +1,475 @@
+%{
+		#include "hw3_output.hpp"
+		#include "utility.hpp"
+		int yylex();
+		void yyerror(const char*);
+		extern int yylineno;
+		#include <string>
+        #include <list>
+        #include <vector>
+        #include <map>
+        #include <stack>
+		
+		
+        using std::string;
+        using std::list;
+        using std::vector;
+        using std::map;
+        using std::stack;
+
+		vector<map<string,Symbol*>*> symbol_vector;
+        map<string,Function*> functions;
+        stack<int> offset_stack;
+        stack<vector<Symbol*>*> symbol_stack;
+        string latest_function = "";
+        int in_while = 0;
+        int in_switch = 0;
+
+	
+%}
+
+%token ID NUM STRING
+%token VOID INT BYTE B BOOL TRUE FALSE RETURN WHILE 
+%token BREAK CONTINUE SWITCH CASE DEFAULT COLON SC COMMA IF
+%right ASSIGN
+%left OR
+%left AND
+%left EQUAL
+%nonassoc RELOP 
+%left PLUS
+%left MULT
+%right NOT
+%left LPAREN RPAREN LBRACE RBRACE 
+%nonassoc ELSE
+
+
+%%
+
+//std::cout<< "exp list, exp type: " << $1->getType() <<std::endl;
+
+Program:		Funcs {}
+			
+Funcs:			/*epsilon*/ {}
+				| FuncDecl Funcs {}
+FuncDecl:		RetType ID LPAREN Formals RPAREN LBRACE
+					{
+
+					latest_function = $1->getType();
+
+					if(symbol_vector[0]->find($2->getName()) != symbol_vector[0]->end()) {
+						 output::errorDef(yylineno,$2->getName());
+						 exit(1);
+					}
+
+					vector<string>* argTypes = new vector<string>(); //see if it fits
+
+					for (std::list<parameter>::iterator it=$4->getParList()->begin(); it != $4->getParList()->end(); ++it) {
+						argTypes->push_back(it->getType());
+
+					}
+
+					string func_type = output::makeFunctionType($1->getType(),*argTypes);
+
+					Symbol* new_symbol = new Symbol($2->getName(),func_type,FUNCTION_OFFSET);
+					(*symbol_vector[0])[$2->getName()] = new_symbol;
+					symbol_stack.top()->push_back(new_symbol);
+					// inserts to Functions map
+					Function* new_func = new Function($2->getName(),$1->getType(),*argTypes);
+					functions[$2->getName()] = new_func;
+					map<string,Symbol*>* new_symbol_table = new map<string,Symbol*>(); // see if it fits
+					vector<Symbol*>* symbol_scope = new vector<Symbol*>();
+					int i =-1;
+                    symbol_vector.push_back(new_symbol_table);
+					for (std::list<parameter>::iterator it=$4->getParList()->begin(); it != $4->getParList()->end(); ++it,i--) {
+                        if(IDDefined(symbol_vector,it->getName()))
+                        {
+                            output::errorDef(yylineno,it->getName());
+                            exit(1);
+                        }
+						Symbol* new_symbol = new Symbol(it->getName(),it->getType(),i);
+						(*symbol_vector[symbol_vector.size()-1])[it->getName()] = new_symbol;
+						symbol_scope->push_back(new_symbol);
+					}
+					symbol_stack.push(symbol_scope); // The problem is that "Symbol stack" is a vector for Symbols, not for vectors
+					offset_stack.push(offset_stack.top());
+                    }
+					Statements RBRACE CLOSE_SCOPE {}
+					
+RetType:		Type {
+                        $$ = (Node*)new retType($1->getType());
+                     }
+				| VOID {
+				           $$ = (Node*)new retType("VOID");
+				       }
+Formals:		/*epsilon*/ 
+					{
+					    $$ = (Node*) new Formals();
+					}
+				| FormalsList 
+					{
+					    $$ = (Node*) new Formals($1->getParList());
+					}
+FormalsList:	FormalDecl 
+					{
+					    $$ = new FormalsList();
+					    $$->getParList()->push_front(*$1->getPar());
+					}
+				| FormalDecl COMMA FormalsList 
+					{
+					    $$ = new FormalsList();
+					    $$->setParList($3->getParList());
+					    parameter* temp_p = new parameter(*$1->getPar());
+					    $$->getParList()->push_front(*temp_p);
+					}
+FormalDecl:		Type ID
+                    {
+                        $$ = (Node*) new FormalDecl($2->getName(),$1->getType());
+                    }
+Statements:		Statement{}
+				| Statements Statement {}
+Statement:		LBRACE OPEN_SCOPE Statements RBRACE CLOSE_SCOPE {}
+				| Type ID SC { 
+					if(IDDefined(symbol_vector,$2->getName())){
+						output::errorDef(yylineno,$2->getName());
+						exit(1);
+					}
+					insertSymbol(symbol_vector,offset_stack,symbol_stack,$2->getName(),$1->getType());
+				}
+				| Type ID ASSIGN Exp SC {
+                    if (IDDefined(symbol_vector,$2->getName())){
+                        output::errorDef(yylineno,$2->getName());
+                        exit(1);
+                    }
+                    if($1->getType() != $4->getType())
+                    {
+                        if($1->getType() != "INT" || $4->getType() != "BYTE"){
+                            output::errorMismatch(yylineno);
+                            exit(1);
+                        }
+                    }
+                    insertSymbol(symbol_vector,offset_stack,symbol_stack,$2->getName(),$1->getType());
+				}
+				| ID ASSIGN Exp SC {
+				    if (!IDDefined(symbol_vector,$1->getName()))
+				    {
+                        output::errorUndef(yylineno,$1->getName());
+                        exit(1);
+                    }
+                    Symbol* temp_symbol = findSymbol(symbol_vector,$1->getName());
+                    if(temp_symbol->getType() != $3->getType())
+                    {
+                        if(temp_symbol->getType() != "INT" || $3->getType() != "BYTE"){
+                            output::errorMismatch(yylineno);
+                            exit(1);
+                        }
+                    }
+				}
+				| Call SC {}
+				| RETURN SC {
+                    if(latest_function != "VOID")
+                    {
+                        output::errorMismatch(yylineno);
+                        exit(1);
+                    }
+				 }
+				| RETURN Exp SC {
+                    if(($2->getType() != latest_function) || (latest_function == "VOID"))
+                    {
+                        if(latest_function != "INT" || $2->getType() != "BYTE")
+                        {
+                            output::errorMismatch(yylineno);
+                            exit(1);
+                        }
+                    }
+				 }
+				| IF LPAREN IfExp RPAREN OPEN_SCOPE Statement CLOSE_SCOPE
+				  {}
+				| IF LPAREN IfExp RPAREN OPEN_SCOPE Statement CLOSE_SCOPE ELSE OPEN_SCOPE Statement CLOSE_SCOPE
+				{}
+				| WHILE LPAREN Exp RPAREN
+				  {
+                      if($3->getType() != "BOOL")
+                      {
+                         output::errorMismatch(yylineno);
+                         exit(1);
+                      }
+                      in_while++;
+                  }
+				  OPEN_SCOPE Statement CLOSE_SCOPE
+				  {
+				      in_while--;
+				  }
+				| BREAK SC {
+				      if((in_while == 0) && (in_switch == 0))
+				      {
+				          output::errorUnexpectedBreak(yylineno);
+				          exit(1);
+				      }
+				  }
+				| CONTINUE SC {
+				      if(in_while == 0)
+				      {
+				          output::errorUnexpectedContinue(yylineno);
+				          exit(1);
+				      }
+				  }
+				| SWITCH LPAREN Exp RPAREN LBRACE
+				  {
+                      if(($3->getType() != "INT") && ($3->getType() != "BYTE"))
+                      {
+                         output::errorMismatch(yylineno);
+                         exit(1);
+                      }
+                      in_switch++;
+                  }
+				OPEN_SCOPE CaseList RBRACE CLOSE_SCOPE {
+				      in_switch--;
+				  }
+Call:			ID LPAREN ExpList RPAREN
+                                        {
+                                            if (functions.find($1->getName()) == functions.end()) {
+												output::errorUndefFunc(yylineno, $1->getName());
+												exit(1);
+											}
+											Function* func = functions[$1->getName()];
+											if(func->getArgTypes().size() != $3->getTypes()->size())
+											{
+											    output::errorPrototypeMismatch(yylineno, func->getName(), func->getArgTypes());
+                                                exit(1);
+											}
+											for(unsigned int i=0; i<func->getArgTypes().size();i++)
+											{
+                                                if (func->getArgTypes()[i] != (*$3->getTypes())[i]) {
+                                                    if(func->getArgTypes()[i] != "INT" || (*$3->getTypes())[i] != "BYTE"){
+                                                        output::errorPrototypeMismatch(yylineno, func->getName(), func->getArgTypes());
+                                                        exit(1);
+                                                    }
+                                                }
+											}
+											$$ = (Node*) new Call(func->getRetType());
+											
+										}
+				| ID LPAREN RPAREN
+				                    {
+				                        if (functions.find($1->getName()) == functions.end())
+				                        {
+											output::errorUndefFunc(yylineno, $1->getName());
+											exit(1);
+										}
+										Function* func = functions[$1->getName()];
+										if (!func->getArgTypes().empty())
+										{
+											output::errorPrototypeMismatch(yylineno, func->getName(), func->getArgTypes());
+											exit(1);
+										}
+										$$ = (Node*) new Call(func->getRetType());
+									}
+ExpList:		Exp {
+                        $$ = (Node*) new ExpList();
+                        $$->push_front($1->getType());
+
+                    }
+				| Exp COMMA ExpList {
+				                        $$ = (Node*) new ExpList($3->getTypes());
+									    $$->push_front($1->getType());
+									}
+Type:			INT {
+                        $$ = new Type("INT");
+                    }
+				| BYTE {
+				        $$ = new Type("BYTE");
+				        }
+				| BOOL {
+				        $$ = new Type("BOOL");
+				        }
+Exp:			LPAREN Exp RPAREN {
+                                      $$ = (Node*) new Exp($2->getType());
+                                  }
+				| Exp PLUS Exp {
+				                    $$ = (Node*) new Exp();
+				                    if ( (!$1->isNumerical()) || (!$3->isNumerical())) {
+										output::errorMismatch(yylineno);
+										exit(1);
+									}
+									if ( ($1->getType() == "BYTE") && ($3->getType() == "BYTE") ) {
+										$$->setType("BYTE");
+									}
+									else {
+										$$->setType("INT");
+									}
+								}
+				| Exp MULT Exp {
+				                    $$ = (Node*) new Exp();
+				                    if ( (!$1->isNumerical()) || (!$3->isNumerical())) {
+										output::errorMismatch(yylineno);
+										exit(1);
+									}
+									if ( ($1->getType() == "BYTE") && ($3->getType() == "BYTE") ) {
+										$$->setType("BYTE");
+									}
+									else {
+										$$->setType("INT");
+									}
+								}
+				| ID {
+						if(!IDDefined(symbol_vector,$1->getName())) {
+							output::errorUndef(yylineno, $1->getName());
+							exit(1);
+						}
+						if(functions.find($1->getName()) != functions.end())
+						{
+                            output::errorUndef(yylineno, $1->getName());
+                            exit(1);
+						}
+                        Symbol* id = findSymbol(symbol_vector,$1->getName());
+						$$ = (Node*) new Exp(id->getType());
+					}
+				| Call {
+				           $$ = (Node*) new Exp($1->getType());
+				       }
+				| NUM {
+				           $$ = (Node*) new Exp("INT");
+				      }
+				| NUM B
+				  {
+				      if($1->getValue() > 255)
+				      {
+				           output::errorByteTooLarge(yylineno,$1->getSTR());
+				           exit(1);
+				      }
+				      $$ = (Node*) new Exp("BYTE");
+				  }
+				| STRING
+				  {
+				      $$ = (Node*) new Exp("STRING");
+				  }
+				| TRUE
+				  {
+				      $$ = (Node*) new Exp("BOOL");
+				  }
+				| FALSE
+				  {
+				      $$ = (Node*) new Exp("BOOL");
+				  }
+				| NOT Exp {
+                                if ($2->getType() != "BOOL") {
+                                    output::errorMismatch(yylineno);
+                                    exit(1);
+                                }
+                                $$ = (Node*) new Exp("BOOL");
+						    }
+				| Exp AND Exp {
+				                    if ( ($1->getType() != "BOOL") || ($3->getType() != "BOOL"))
+				                    {
+									    output::errorMismatch(yylineno);
+									    exit(1);
+								    }
+				                    $$ = (Node*) new Exp("BOOL");
+				               }
+				| Exp OR Exp {
+				                    if ( ($1->getType() != "BOOL") || ($3->getType() != "BOOL")) {
+									    output::errorMismatch(yylineno);
+									    exit(1);
+								    }
+				                    $$ = (Node*) new Exp("BOOL");
+								}
+				| Exp RELOP Exp {
+                                    if ( (!$1->isNumerical()) || (!$3->isNumerical())) {
+                                        output::errorMismatch(yylineno);
+                                        exit(1);
+                                    }
+				                    $$ = (Node*) new Exp("BOOL");
+								}
+				| Exp EQUAL Exp {
+				                    if ( (!$1->isNumerical()) || (!$3->isNumerical()))
+                                    {
+                                        output::errorMismatch(yylineno);
+                                        exit(1);
+                                    }
+				                    $$ = (Node*) new Exp("BOOL");
+				                }
+IfExp:          Exp
+                {
+                      if($1->getType() != "BOOL")
+                      {
+                           output::errorMismatch(yylineno);
+                           exit(1);
+                      }
+
+                }
+CaseList:		CaseDecl CaseList {}
+				| CaseDecl {}
+				| DEFAULT COLON Statements {}
+CaseDecl:		CASE NUM COLON Statements {}
+OPEN_SCOPE: 	/*epsilon*/ 
+					{
+					    map<string,Symbol*>* new_symbol_table = new map<string,Symbol*>();
+					    symbol_vector.push_back(new_symbol_table);
+						vector<Symbol*>* new_symbol_scope = new vector<Symbol*>;
+						symbol_stack.push(new_symbol_scope);
+					    offset_stack.push(offset_stack.top());
+					}
+CLOSE_SCOPE:   /*epsilon*/
+                    {
+						output::endScope();
+						for (unsigned int i=0; i<symbol_stack.top()->size();i++) {
+		                    output::printID((*symbol_stack.top())[i]->getName(),(*symbol_stack.top())[i]->getOffset(),(*symbol_stack.top())[i]->getType());
+						}
+                        symbol_vector.pop_back();
+                        offset_stack.pop();
+						symbol_stack.pop();
+
+                    }
+
+
+
+%%
+
+void yyerror(const char*) {
+	output::errorSyn(yylineno);
+	exit(1);
+}
+
+
+
+int main() {
+    vector<string> temp_v1;
+    vector<string> temp_v2;
+    string temp_str1 = "print";
+    string temp_str2 = "printi";
+    temp_v1.push_back("STRING");
+    temp_v2.push_back("INT");
+    map<string,Symbol*>* first_symbol_table = new map<string,Symbol*>();
+	string print_type = output::makeFunctionType("VOID",temp_v1);
+	string printi_type = output::makeFunctionType("VOID",temp_v2);
+	Symbol* print_symbol = new Symbol("print",print_type,FUNCTION_OFFSET);
+	Symbol* printi_symbol = new Symbol("printi",printi_type,FUNCTION_OFFSET);
+	(*first_symbol_table)[temp_str1] = print_symbol;
+	(*first_symbol_table)[temp_str2] = printi_symbol;
+	symbol_stack.push(new vector<Symbol*>());
+	symbol_stack.top()->push_back(print_symbol);
+	symbol_stack.top()->push_back(printi_symbol);
+	symbol_vector.push_back(first_symbol_table);
+	offset_stack.push(0);
+	functions[temp_str1] = new Function("print","VOID",temp_v1);
+	functions[temp_str2] = new Function("printi","VOID",temp_v2);
+
+	int result = yyparse();
+	if(functions.find("main") == functions.end())
+    {
+        output::errorMainMissing();
+        exit(1);
+    }
+	if ( (functions["main"]->getRetType() != "VOID") || (functions["main"]->getArgTypes().size() != 0) )
+	{
+        output::errorMainMissing();
+        exit(1);
+    }
+	output::endScope();
+	for (unsigned int i=0; i<symbol_stack.top()->size();i++) {
+		output::printID((*symbol_stack.top())[i]->getName(),(*symbol_stack.top())[i]->getOffset(),(*symbol_stack.top())[i]->getType());
+	}
+	return result;
+
+}
+
